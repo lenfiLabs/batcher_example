@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lenfi-batchers
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lenfi-batchers
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: lenfi-batchers
+    spec:
+      containers:
+      - image: registry.digitalocean.com/aada/lenfi-batchers:stag-latest
+        imagePullPolicy: IfNotPresent
+        name: lenfi-batchers
+        volumeMounts:
+        - mountPath: /app/key.sk
+          subPath: key.sk
+          name: lenfi-batcher
+          readOnly: true
+        - mountPath: /app/key.addr
+          subPath: key.addr
+          name: lenfi-batcher
+          readOnly: true
+        - mountPath: /app/.env
+          subPath: .env
+          name: lenfi-batcher
+          readOnly: true
+      volumes:
+      - name: lenfi-batcher
+        secret:
+          defaultMode: 493
+          secretName: lenfi-batcher
+          items:
+          - key: key.addr
+            path: key.addr
+          - key: key.sk
+            path: key.sk
+          - key: .env
+            path: .env
+      dnsPolicy: ClusterFirst
+      hostAliases:
+      - hostnames:
+        - graphql-preprod.aada.finance
+        ip: 10.2.0.5
+      - hostnames:
+        - testnet-stag-api.aada.finance
+        - testnet-ogmios.lenfi.io
+        - testnet-kupo.lenfi.io
+        ip: 10.2.0.4
+      imagePullSecrets:
+      - name: aada
+      restartPolicy: Always
+      schedulerName: default-scheduler

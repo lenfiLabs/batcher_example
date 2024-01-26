@@ -1,0 +1,5 @@
+key.addr
+node_modules/
+key.sk
+.DS_Store
+.env

@@ -1,0 +1,26 @@
+{
+  "name": "v2_parser",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20.5.9",
+    "@types/pg": "^8.10.9",
+    "typescript": "^5.2.2"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.0.0",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.4.0",
+    "lucid-cardano": "^0.10.7",
+    "translucent-cardano": "github:txpipe/translucent#micah/no-mathjs"
+  }
+}

@@ -1,0 +1,5 @@
+node_modules/
+.git/
+.k8s/
+.vscode/
+.github/workflows/

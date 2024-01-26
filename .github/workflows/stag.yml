@@ -1,0 +1,50 @@
+name: build on stag branch
+on:
+  push:
+    branches:
+      - stag
+
+env:
+  REGISTRY: "registry.digitalocean.com/aada"
+  IMG_NAME: "lenfi-batchers"
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v3.5.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Log in to DigitalOcean Container Registry with short-lived credentials
+        run: doctl registry login --expiry-seconds 600
+      - name: Build & push
+        uses: docker/build-push-action@v4
+        with:
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMG_NAME }}:${{ github.ref_name }}-${{ github.run_id }}
+            ${{ env.REGISTRY }}/${{ env.IMG_NAME }}:${{ github.ref_name }}-latest
+
+  deploy:
+    runs-on: [self-hosted, linux]
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v3.5.0
+      - uses: azure/setup-kubectl@v2.0
+      - uses: Azure/k8s-set-context@v2
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG_STAG }}
+      - uses: Azure/k8s-deploy@v4.5
+        with:
+          action: deploy
+          manifests: |
+             .k8s/${{ github.ref_name }}/deployment.yaml
+          images: |
+             ${{ env.REGISTRY }}/${{ env.IMG_NAME }}:${{ github.ref_name }}-${{ github.run_id }}
