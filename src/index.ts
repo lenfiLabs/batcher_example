@@ -167,9 +167,9 @@ async function mainLoop() {
       console.log("Current tx hash", batcherUtxo.txHash);
       if (batcherUtxo.datum != "d87980") {
         // try {
-        console.log("this is borrow");
+        console.log("this is liquidation");
         const txHash = await doTheBorrow(lucid, batcherUtxo);
-        console.log(`Borrowed TX hash: ${txHash}`);
+        console.log(`liquidated. TX hash: ${txHash}`);
         // } catch {
         //   console.log(`Could not complete order TXhash ${batcherUtxo.txHash}.`);
         // }
@@ -1196,7 +1196,7 @@ async function doTheLiquidation(
     collateralUtxo,
     CollateralSpend.datum
   );
-  console.log("collUTXO", collateralUtxo)
+
   let continuingOutputIdx = 0n;
   let tx = lucid.newTx();
 
@@ -1207,8 +1207,6 @@ async function doTheLiquidation(
     GOV_TOKEN_NAME
   );
   const poolNftName = collateralDatumMapped.poolNftName;
-  console.log("collateral tx hash", validators.collateralValidatorHash);
-  console.log("pool nft", validators.poolScriptHash + poolNftName);
   const poolArtifacts = await getPoolArtifacts(poolNftName, validators, lucid);
   var poolDatumMapped: PoolSpend["datum"] = poolArtifacts.poolDatumMapped;
   const poolAddress = poolArtifacts.poolUTxO.address;
