@@ -423,7 +423,8 @@ async function doThedeposit(
   console.log("Off-chain validation passed, will sign the transaction");
 
   const signedTx = await completedTx.sign().complete();
-  const txHash = await signedTx.submit();
+  // const txHash = await signedTx.submit();
+  const txHash = "";
   await lucid.awaitTx(txHash);
   return txHash;
 }
@@ -462,12 +463,20 @@ async function doTheWithdraw(
     poolDatumMapped.params.poolNftName
   );
 
+
+  if (batcherDatumMapped.order.lpTokensBurn > lpTokensInBatcher) {
+    console.log("Trying to withdraw more than available");
+    return "";
+  }
+
   if (Number(lpTokensInBatcher) === 0) {
     console.log("Trying to withdraw 0");
     return "";
   }
 
-  const initialCountBN = new BigNumber(lpTokensInBatcher);
+  const initialCountBN = new BigNumber(
+    Number(batcherDatumMapped.order.lpTokensBurn)
+  );
   const balanceBN = new BigNumber(
     Number(poolDatumMapped.balance + poolDatumMapped.lentOut)
   );
@@ -488,7 +497,8 @@ async function doTheWithdraw(
     poolArtifacts.poolConfigDatum.poolFee;
 
   poolDatumMapped.totalLpTokens =
-    poolDatumMapped.totalLpTokens - BigInt(lpTokensInBatcher);
+    poolDatumMapped.totalLpTokens -
+    BigInt(batcherDatumMapped.order.lpTokensBurn);
 
   if (Number(poolDatumMapped.totalLpTokens) === 0) {
     console.log("Trying to withdraw all");
@@ -626,7 +636,7 @@ async function doTheWithdraw(
     .mintAssets(
       {
         [toUnit(validators.lpTokenPolicyId, poolNftName)]: BigInt(
-          lpTokensInBatcher * -1
+          BigInt(batcherDatumMapped.order.lpTokensBurn) * -1n
         ),
       },
       Data.to(lpTokenRedeemer, LiquidityTokenLiquidityToken.redeemer)
@@ -1460,7 +1470,6 @@ async function doTheLiquidation(
     Number(collateralDatumMapped.poolConfig.loanFeeDetails.liquidationFee)
   );
 
-
   let feeAmount = Math.floor(
     new BigNumber(Number(collateralValueInAda))
       .minus(Number(debtValueInAda))
@@ -1494,7 +1503,6 @@ async function doTheLiquidation(
       )
     );
   }
-
 
   const healthFactor = new BigNumber(Number(collateralValueInAda))
     .multipliedBy(1000000)
@@ -1595,7 +1603,6 @@ async function doTheLiquidation(
     .validTo(validityRange.validTo)
     .attachMetadata(674, metadata);
 
-    
   // For each oracle item read and add details to TX
   oracleDetails.forEach(async (oracle) => {
     tx.withdraw(
