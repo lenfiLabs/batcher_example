@@ -13,7 +13,6 @@ import {
   networkToId,
 } from "translucent-cardano";
 import { C } from "lucid-cardano";
-
 import {
   LpTokenCalculation,
   Validators,
@@ -31,6 +30,7 @@ import {
   DelayedMergeSpend,
   LeftoversLeftovers,
   LiquidityTokenLiquidityToken,
+  OracleValidatorFeedType,
   OracleValidatorWithdrawValidate,
   OrderContractBorrowOrderContract,
   OrderContractDepositOrderContract,
@@ -42,10 +42,6 @@ import {
   PoolSpend,
 } from "./plutus";
 import BigNumber from "bignumber.js";
-import { signAnything } from "./oracle/oracle_feeds";
-
-const BLOCKFROST_API_KEY = process.env["BLOCKFROST_KEY"];
-const BLOCKFROST_URL = process.env["BLOCKFROST_URL"];
 
 export function updateUserValue(
   userValues: OutputValue,
@@ -85,29 +81,40 @@ export function toUnitOrLovelace(policyId: PolicyId, assetName?: string): Unit {
   return toUnit(policyId, assetName);
 }
 
-export function calculateLpTokens(
+export function calculateReceivedLptokens(
   initialCount: bigint,
   alreadyLend: bigint,
   balanceToDeposit: bigint,
   totalLpTokens: bigint
-): LpTokenCalculation {
+): number {
   const initialCountBN = new BigNumber(Number(initialCount));
   const alreadyLendBN = new BigNumber(Number(alreadyLend));
   const balanceToDepositBN = new BigNumber(Number(balanceToDeposit));
   const totalLPTokensBN = new BigNumber(Number(totalLpTokens));
 
-  const lpTokensToDeposit = balanceToDepositBN
+  const lpTokensToReceive = balanceToDepositBN
     .multipliedBy(totalLPTokensBN)
     .div(initialCountBN.plus(alreadyLendBN));
 
-  const whatValidatorWillExpect = lpTokensToDeposit
-    .multipliedBy(initialCountBN.plus(alreadyLendBN))
-    .div(totalLPTokensBN);
+  return Math.floor(lpTokensToReceive.toNumber());
+}
 
-  return {
-    depositAmount: BigInt(Math.floor(whatValidatorWillExpect.toNumber())),
-    lpTokenMintAmount: BigInt(Math.floor(lpTokensToDeposit.toNumber())),
-  };
+export function calculateLpsToBurn(
+  initialCount: bigint,
+  alreadyLend: bigint,
+  balanceToWithdraw: bigint,
+  totalLpTokens: bigint
+): number {
+  const initialCountBN = new BigNumber(Number(initialCount));
+  const alreadyLendBN = new BigNumber(Number(alreadyLend));
+  const balanceToWithdrawBN = new BigNumber(Number(balanceToWithdraw));
+  const totalLPTokensBN = new BigNumber(Number(totalLpTokens));
+
+  const lpTokensToBurn = balanceToWithdrawBN
+    .multipliedBy(totalLPTokensBN)
+    .div(initialCountBN.plus(alreadyLendBN));
+
+  return Math.floor(lpTokensToBurn.toNumber());
 }
 
 export async function findAssetQuantity(
@@ -184,7 +191,6 @@ export function getValidityRange(lucid: Translucent): ValidityRange {
 
 export function collectValidators(
   lucid: Translucent,
-  poolConfig: PoolConfigSpend["datum"],
   poolTokenName: string,
   govTokenName: string
 ) {
@@ -204,8 +210,8 @@ export function collectValidators(
   const oracleNftPolicyId: PolicyId =
     lucid.utils.mintingPolicyToId(oracleNftPolicy);
 
-  const poolConfigValidator = new PoolConfigSpend(govNft, poolConfig);
-  const poolConfigPolicy = new PoolConfigMint(govNft, poolConfig);
+  const poolConfigValidator = new PoolConfigSpend(govNft);
+  const poolConfigPolicy = new PoolConfigMint(govNft);
   const poolConfigPolicyId: PolicyId =
     lucid.utils.mintingPolicyToId(poolConfigPolicy);
   const poolValidator = new PoolSpend(delegatorNftPolicyId, poolConfigPolicyId);
@@ -547,58 +553,86 @@ export function getInterestRates(
 export async function collectOracleDetails(
   oracleNft: AssetClass,
   asset: AssetClass,
+  amount: number,
+  lovalces: number,
   lucid: Translucent,
+  oracleDetails: OracelValidatorDetails[]
 ) {
   const oracleUtxo = await lucid.provider.getUtxoByUnit(
     toUnit(oracleNft.policyId, oracleNft.assetName)
   );
+
   // This is data feed that we require oracle to sign. In testnet oracle will sign any data. See oracle_feeds.ts
   const data: PriceFeed = {
-    Aggregated: [
+    Pooled: [
       {
         token: {
           policyId: asset.policyId,
           assetName: asset.assetName,
         },
-        tokenPriceInLovelaces: 1n,
-        denominator: 2n,
-        validTo: BigInt(new Date().getTime() + 120000000),
+
+        tokenAAmount: BigInt(amount),
+        tokenBAmount: BigInt(lovalces),
+        validTo: BigInt(Date.now() + 14 * 60 * 1000),
       },
     ],
   };
 
-  const loanOracleDetailsFeed = await signAnything(data);
-
-  const oracleValidatorHash = lucid.utils.getAddressDetails(oracleUtxo.address)
-    .paymentCredential?.hash;
-
-  const oracelRewardAddress = C.RewardAddress.new(
-    networkToId(lucid.network),
-    C.StakeCredential.from_scripthash(
-      C.ScriptHash.from_hex(oracleValidatorHash || "")
-    )
-  )
-    .to_address()
-    .to_bech32(undefined);
-
-  return {
-    nftReferenceUtxo: oracleUtxo,
-    rewardAddress: oracelRewardAddress,
-    redeemer: loanOracleDetailsFeed,
-    scriptReferenceUtxo: oracleUtxo,
-    oracleValidatorHash // This is not correct for the moment. Probably should get this from DB and pass it over here.
+  const requestData = {
+    data: Data.to(data, OracleValidatorFeedType["_redeemer"]),
   };
+
+  const apiEndpoints = ["https://oracle-node-0.lenfi.io/validateData"]; // This must be moved to GIST
+
+  const responses = await fetchDataFromEndpoints(apiEndpoints, requestData);
+
+  for (const response of responses) {
+    if ("signature" in response) {
+      const loanOracleDetailsFeed = {
+        data: data,
+        signatures: [
+          {
+            signature: response.signature,
+            keyPosition: 0n,
+          },
+        ],
+      };
+
+      const oracleValidatorHash = lucid.utils.getAddressDetails(
+        oracleUtxo.address
+      ).paymentCredential?.hash;
+
+      const oracelRewardAddress = C.RewardAddress.new(
+        networkToId(lucid.network),
+        C.StakeCredential.from_scripthash(
+          C.ScriptHash.from_hex(oracleValidatorHash || "")
+        )
+      )
+        .to_address()
+        .to_bech32(undefined);
+
+      const oracleResult = {
+        nftReferenceUtxo: oracleUtxo,
+        rewardAddress: oracelRewardAddress,
+        redeemer: loanOracleDetailsFeed,
+        scriptReferenceUtxo: oracleUtxo, // This is not correct for the moment. Probably should get this from DB and pass it over here.
+      };
+
+      oracleDetails.push(oracleResult);
+    }
+  }
+  return { oracleDetails, data };
 }
 
 export function getAdaAmountIfBought(
   assetAPolicyId: PolicyId,
   assetATokenName: string,
-  oracleDatum: OracleValidatorWithdrawValidate["redeemer"],
+  oracleDatum: PriceFeed,
   assetAmount: bigint
 ): bigint {
-  if ("Pooled" in oracleDatum.data) {
+  if ("Pooled" in oracleDatum) {
     // Existing logic for Pooled
-    const pooledData = oracleDatum.data.Pooled.find(
+    const pooledData = oracleDatum.Pooled.find(
       (item) =>
         item.token.policyId === assetAPolicyId &&
         item.token.assetName === assetATokenName
@@ -620,9 +654,9 @@ export function getAdaAmountIfBought(
         )
       )
     );
-  } else if ("Aggregated" in oracleDatum.data) {
+  } else if ("Aggregated" in oracleDatum) {
     // New logic for Aggregated
-    const aggregatedData = oracleDatum.data.Aggregated.find(
+    const aggregatedData = oracleDatum.Aggregated.find(
       (item) =>
         item.token.policyId === assetAPolicyId &&
         item.token.assetName === assetATokenName
@@ -647,12 +681,12 @@ export function getAdaAmountIfBought(
 export function getAdaAmountIfSold(
   assetAPolicyId: PolicyId,
   assetATokenName: string,
-  oracleDatum: OracleValidatorWithdrawValidate["redeemer"],
+  oracleDatum: PriceFeed,
   assetAmount: bigint
 ): bigint {
-  if ("Pooled" in oracleDatum.data) {
+  if ("Pooled" in oracleDatum) {
     // Existing logic for Pooled
-    const pooledData = oracleDatum.data.Pooled.find(
+    const pooledData = oracleDatum.Pooled.find(
       (item) =>
         item.token.policyId === assetAPolicyId &&
         item.token.assetName === assetATokenName
@@ -678,9 +712,9 @@ export function getAdaAmountIfSold(
         )
       )
     );
-  } else if ("Aggregated" in oracleDatum.data) {
+  } else if ("Aggregated" in oracleDatum) {
     // New logic for Aggregated
-    const aggregatedData = oracleDatum.data.Aggregated.find(
+    const aggregatedData = oracleDatum.Aggregated.find(
       (item) =>
         item.token.policyId === assetAPolicyId &&
         item.token.assetName === assetATokenName
@@ -702,45 +736,57 @@ export function getAdaAmountIfSold(
   }
 }
 
+export function getPlatformFee(
+  loanAmount: bigint,
+  balance: bigint,
+  lentOut: bigint,
+  loanFeeDetails: PoolConfigSpend['datum']['loanFeeDetails'],
+): bigint {
+  const utilizationRate = (loanAmount * 1000000n) / (lentOut + balance)
+
+  if (utilizationRate < loanFeeDetails.tier_1Threshold) {
+    return loanFeeDetails.tier_1Fee
+  } else if (utilizationRate < loanFeeDetails.tier_2Threshold) {
+    return loanFeeDetails.tier_2Fee
+  } else {
+    return loanFeeDetails.tier_3Fee
+  }
+}
+
 export function assetGainAdaSale(
-  oracleDatum: OracleValidatorWithdrawValidate["redeemer"],
+  oracleDatum: PriceFeed,
   sellAmount: bigint,
   assetAPolicyId: string,
   assetATokenName: string
 ): bigint {
-  if ("Pooled" in oracleDatum.data) {
-    const pooledData = oracleDatum.data.Pooled.find(
-      (item) =>
-        item.token.policyId === assetAPolicyId &&
-        item.token.assetName === assetATokenName
-    );
-    if (!pooledData) {
-      throw new Error("Token not found in Pooled price feed");
-    }
+  if ("Pooled" in oracleDatum) {
+
+    console.log(oracleDatum);
+    console
 
     const sellAmountBN = new BigNumber(Number(sellAmount));
-    const token1AmountBN = new BigNumber(Number(pooledData.tokenBAmount));
-    const token2AmountBN = new BigNumber(Number(pooledData.tokenAAmount));
-
-    const nominator = sellAmountBN
-      .multipliedBy(997)
-      .multipliedBy(token1AmountBN);
-    const denominator = token2AmountBN
-      .multipliedBy(1000)
-      .plus(sellAmountBN.multipliedBy(997));
-
-    const result = BigInt(
-      nominator
-        .dividedBy(denominator)
-        .integerValue(BigNumber.ROUND_FLOOR)
-        .toString()
+    const tokenBAmountBN = new BigNumber(
+      Number(oracleDatum.Pooled[0].tokenAAmount)
+    );
+    const tokenAAmount = new BigNumber(
+      Number(oracleDatum.Pooled[0].tokenBAmount)
     );
 
-    return result;
+    const nominator = sellAmountBN
+      .multipliedBy(new BigNumber(997))
+      .multipliedBy(tokenBAmountBN);
+
+    const denominator = tokenAAmount
+      .multipliedBy(new BigNumber(1000))
+      .plus(sellAmountBN.multipliedBy(new BigNumber(997)));
+
+    const assetReturn = nominator.dividedBy(denominator);
+
+    return BigInt(Math.floor(assetReturn.toNumber()));
 
     // return amount;
-  } else if ("Aggregated" in oracleDatum.data) {
-    const aggregatedData = oracleDatum.data.Aggregated.find(
+  } else if ("Aggregated" in oracleDatum) {
+    const aggregatedData = oracleDatum.Aggregated.find(
       (item) =>
         item.token.policyId === assetAPolicyId &&
         item.token.assetName === assetATokenName
@@ -768,3 +814,60 @@ export function assetGainAdaSale(
     throw new Error("Invalid price feed data");
   }
 }
+
+export interface ApiResponse {
+  signature: string; // Adjust according to your actual API response structure
+}
+
+export interface FetchError {
+  error: string;
+  details: any;
+}
+
+export const fetchDataFromEndpoints = async (
+  apiEndpoints: string[],
+  requestData: any
+): Promise<Array<ApiResponse | FetchError>> => {
+  const fetchPromises = apiEndpoints.map(async (url) => {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        body: JSON.stringify(requestData),
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!response.ok) throw new Error("Network response was not ok");
+      return await response.json();
+    } catch (error) {
+      return {
+        error: `Failed to fetch from ${url}`,
+        details: error instanceof Error ? error.message : "Unknown error",
+      };
+    }
+  });
+
+  const timeoutPromise = new Promise<"timeout">((resolve) =>
+    setTimeout(resolve, 5000, "timeout")
+  );
+
+  const results = await Promise.race([
+    Promise.allSettled(fetchPromises),
+    timeoutPromise,
+  ]);
+
+  if (results === "timeout") {
+    return Promise.all(
+      fetchPromises.map((promise) =>
+        promise.catch((error) => ({
+          error: "Timeout before response",
+          details: error,
+        }))
+      )
+    );
+  } else {
+    return results.map((result) =>
+      result.status === "fulfilled"
+        ? result.value
+        : { error: "Failed to fetch", details: result.reason }
+    );
+  }
+};

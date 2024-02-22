@@ -25,10 +25,11 @@ bun index.ts
 #### .env example
 ```
 # .env
-BLOCKFROST_URL=https://cardano-preprod.blockfrost.io/api/v0
+BLOCKFROST_URL=https://cardano-mainnet.blockfrost.io/api/v0
 BLOCKFROST_KEY=
-BLOCKFROST_ENVIRONMENT=Preprod
-MAESTRO_KEY=OziiWPAEZ6tXznMbrUWm6STNlOXD2mzY
+ENVIRONMENT=Mainnet
+MAESTRO_KEY=
+BATCHER_KEY= {your batcher key ed25519_ format}
 ```
 
 

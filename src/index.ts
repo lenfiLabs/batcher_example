@@ -12,20 +12,22 @@ import {
 import deployedValidatorsJson from "./../deployedValidators.json";
 import deployedLpsJson from "./../deployedLps.json";
 import deployedOraclessJson from "./../deployedOracles.json";
+import { MaestroClient, Configuration } from "@maestro-org/typescript-sdk";
+
 import {
   BatcherOutput,
+  BorrowMetadataStandard,
   DeployedLPs,
   DeployedValidators,
-  LpTokenCalculation,
   OracelValidatorDetails,
   OutputValue,
+  PriceFeed,
   Validators,
   ValidityRange,
 } from "./types";
 
 import {
   calculateInterestAmount,
-  calculateLpTokens,
   collectValidators,
   findAssetQuantity,
   generateReceiverAddress,
@@ -44,8 +46,10 @@ import {
   getAdaAmountIfSold,
   getAdaAmountIfBought,
   assetGainAdaSale,
+  calculateReceivedLptokens,
+  getPlatformFee,
 } from "./utilities";
-import { GOV_TOKEN_NAME, defaultConfig } from "./constants";
+import { GOV_TOKEN_NAME } from "./constants";
 
 import {
   CollateralMint,
@@ -68,20 +72,22 @@ mainLoop();
 async function mainLoop() {
   while (true) {
     console.log("Starting batcher Process. Will build Translucent.");
-    const network: MaestroSupportedNetworks =
-      process.env.BLOCKFROST_ENVIRONMENT || "Mainnet";
+
+    const maestroNetwork: MaestroSupportedNetworks =
+      process.env.ENVIRONMENT === "Mainnet"
+        ? process.env.ENVIRONMENT
+        : "Preprod";
+
     const provider: Provider = new Maestro({
-      network: network,
+      network: maestroNetwork,
       apiKey: process.env.MAESTRO_KEY || "",
-      turboSubmit: true,
     });
 
-    let lucid = await Translucent.new(provider, network);
+    const lucid = await Translucent.new(provider, maestroNetwork);
 
     // Order validators are not parameterized by pool or gov tokens.
     const validators = collectValidators(
       lucid,
-      defaultConfig,
       "", // Order validators are not parameterized by pool token name.
       GOV_TOKEN_NAME // Gov token name
     );
@@ -167,9 +173,9 @@ async function mainLoop() {
       console.log("Current tx hash", batcherUtxo.txHash);
       if (batcherUtxo.datum != "d87980") {
         // try {
-        console.log("this is liquidation");
+        console.log("this is borrow");
         const txHash = await doTheBorrow(lucid, batcherUtxo);
-        console.log(`liquidated. TX hash: ${txHash}`);
+        console.log(`Borrowed TX hash: ${txHash}`);
         // } catch {
         //   console.log(`Could not complete order TXhash ${batcherUtxo.txHash}.`);
         // }
@@ -193,8 +199,6 @@ async function mainLoop() {
     for (const mergeUtxo of mergeUtxos) {
       console.log("Current tx hash", mergeUtxo.txHash);
       if (mergeUtxo.datum != "d87980") {
-        // try {
-        console.log("thhis is Merge");
         const txHash = await doTheMerge(lucid, mergeUtxo);
 
         // } catch {
@@ -207,13 +211,14 @@ async function mainLoop() {
     const utxoToLiquidate = await lucid.utxosByOutRef([
       {
         txHash:
-          "47e165a1a7c942436e02dc06dc1c7a91c09872a5dd65bb03a5e78d71e84f0cea",
+          "eaf4d594c79e92bef951eac80f5b7db6cc24fcab3b9339660f85faf116706427",
         outputIndex: 1,
       },
     ]);
 
     const txHash = await doTheLiquidation(lucid, utxoToLiquidate[0]);
-    console.log(`Borrowed TX hash: ${txHash}`);
+
+    console.log("liquidation TX hash", txHash);
 
     await new Promise((f) => setTimeout(f, 30000));
   }
@@ -239,7 +244,6 @@ async function doThedeposit(
 
   const validators: Validators = collectValidators(
     lucid,
-    defaultConfig,
     poolNftName,
     GOV_TOKEN_NAME
   );
@@ -248,14 +252,14 @@ async function doThedeposit(
   const poolAddress = poolArtifacts.poolUTxO.address;
   var poolDatumMapped = poolArtifacts.poolDatumMapped;
 
-  const lpTokensToDepositDetails: LpTokenCalculation = calculateLpTokens(
+  const lpTokensToReceive: number = calculateReceivedLptokens(
     poolDatumMapped.balance,
     poolDatumMapped.lentOut,
     batcherDatumMapped.order.depositAmount,
     poolDatumMapped.totalLpTokens
   );
 
-  const lpTokensToDeposit = lpTokensToDepositDetails.lpTokenMintAmount + 200n; // THIS is known bug in SC (requires to mint more LP than needed) Is fixed in later version.
+  // const lpTokensToDeposit = lpTokensToDepositDetails.lpTokenMintAmount // THIS is known bug in SC (requires to mint more LP than needed) Is fixed in later version.
 
   const batcherRedeemer: OrderContractDepositOrderContract["redeemer"] = {
     Process: {
@@ -271,7 +275,7 @@ async function doThedeposit(
 
   const toReceive = {
     [poolDatumMapped.params.lpToken.policyId +
-    poolDatumMapped.params.lpToken.assetName]: lpTokensToDeposit,
+    poolDatumMapped.params.lpToken.assetName]: BigInt(lpTokensToReceive),
   };
 
   let valueForUserToReceive: OutputValue = {};
@@ -291,12 +295,19 @@ async function doThedeposit(
   );
   const deployedLps: DeployedLPs = deployedLpsJson;
 
-  const lpValidatorRef = await lucid.utxosByOutRef([
-    {
-      txHash: deployedLps[poolDatumMapped.params.lpToken.policyId].txHash,
-      outputIndex: deployedLps[poolDatumMapped.params.lpToken.policyId].txOref,
-    },
-  ]);
+  const deployedLpRef = poolDatumMapped.params.lpToken.policyId;
+
+  let lpValidatorRef: UTxO[] = [];
+
+  if (deployedLps[deployedLpRef] !== undefined) {
+    lpValidatorRef = await lucid.utxosByOutRef([
+      {
+        txHash: deployedLps[poolDatumMapped.params.lpToken.policyId].txHash,
+        outputIndex:
+          deployedLps[poolDatumMapped.params.lpToken.policyId].txOref,
+      },
+    ]);
+  }
 
   let datum = "";
 
@@ -315,11 +326,13 @@ async function doThedeposit(
   const balanceToDeposit = batcherDatumMapped.order.depositAmount;
 
   poolDatumMapped.balance = BigInt(
-    poolDatumMapped.balance + BigInt(balanceToDeposit)
+    poolDatumMapped.balance +
+      BigInt(balanceToDeposit) +
+      poolArtifacts.poolConfigDatum.poolFee
   );
 
   poolDatumMapped.totalLpTokens = BigInt(
-    poolDatumMapped.totalLpTokens + BigInt(lpTokensToDeposit)
+    poolDatumMapped.totalLpTokens + BigInt(lpTokensToReceive)
   );
 
   const poolRedeemer: PoolSpend["redeemer"] = {
@@ -355,11 +368,15 @@ async function doThedeposit(
     poolDatumMapped.params.loanCs.assetName
   );
 
+  if (process.env.BATCHER_KEY == null) {
+    throw "BATCHER_KEY is not defined";
+  }
+
   lucid.selectWalletFromPrivateKey(
-    "" // Please add your key here ed25519_sk
+    process.env.BATCHER_KEY // On production you will must have your own wallet.
   );
 
-  const tx = await lucid
+  let tx = lucid
     .newTx()
     .readFrom([deployedValidators.poolValidator])
     .collectFrom(
@@ -389,16 +406,23 @@ async function doThedeposit(
     .mintAssets(
       {
         [toUnit(validators.lpTokenPolicyId, poolNftName)]:
-          BigInt(lpTokensToDeposit),
+          BigInt(lpTokensToReceive),
       },
       Data.to(lpTokenRedeemer, LiquidityTokenLiquidityToken.redeemer)
     )
-    .attachMetadata(674, metadata)
-    .complete();
+    .attachMetadata(674, metadata);
+
+  if (lpValidatorRef.length == 0) {
+    console.log("Did not find LP policy. Will attach");
+
+    tx.attachMintingPolicy(validators.lpTokenPolicy);
+  }
+
+  const completedTx = await tx.complete();
 
   console.log("Off-chain validation passed, will sign the transaction");
 
-  const signedTx = await tx.sign().complete();
+  const signedTx = await completedTx.sign().complete();
   const txHash = await signedTx.submit();
   await lucid.awaitTx(txHash);
   return txHash;
@@ -424,7 +448,6 @@ async function doTheWithdraw(
 
   const validators: Validators = collectValidators(
     lucid,
-    defaultConfig,
     poolNftName,
     GOV_TOKEN_NAME
   );
@@ -459,9 +482,14 @@ async function doTheWithdraw(
     )
   );
 
-  poolDatumMapped.balance = poolDatumMapped.balance - BigInt(amountToReceive);
+  poolDatumMapped.balance =
+    poolDatumMapped.balance -
+    BigInt(amountToReceive) +
+    poolArtifacts.poolConfigDatum.poolFee;
+
   poolDatumMapped.totalLpTokens =
     poolDatumMapped.totalLpTokens - BigInt(lpTokensInBatcher);
+
   if (Number(poolDatumMapped.totalLpTokens) === 0) {
     console.log("Trying to withdraw all");
     return "";
@@ -502,13 +530,18 @@ async function doTheWithdraw(
     deployedValidatorsJson
   );
   const deployedLps: DeployedLPs = deployedLpsJson;
+  const deployedLpRef = poolDatumMapped.params.lpToken.policyId;
+  let lpValidatorRef: UTxO[] = [];
 
-  const lpValidatorRef = await lucid.utxosByOutRef([
-    {
-      txHash: deployedLps[poolDatumMapped.params.lpToken.policyId].txHash,
-      outputIndex: deployedLps[poolDatumMapped.params.lpToken.policyId].txOref,
-    },
-  ]);
+  if (deployedLps[deployedLpRef] !== undefined) {
+    lpValidatorRef = await lucid.utxosByOutRef([
+      {
+        txHash: deployedLps[poolDatumMapped.params.lpToken.policyId].txHash,
+        outputIndex:
+          deployedLps[poolDatumMapped.params.lpToken.policyId].txOref,
+      },
+    ]);
+  }
 
   let datum = "";
 
@@ -552,11 +585,15 @@ async function doTheWithdraw(
     value: valueForUserToReceive,
   };
 
+  if (process.env.BATCHER_KEY == null) {
+    throw "BATCHER_KEY is not defined";
+  }
+
   lucid.selectWalletFromPrivateKey(
-    "" // Please add your key here ed25519_sk
+    process.env.BATCHER_KEY // On production you will must have your own wallet.
   );
 
-  const tx = await lucid
+  let tx = lucid
     .newTx()
     .readFrom([deployedValidators.poolValidator])
     .collectFrom(
@@ -594,12 +631,19 @@ async function doTheWithdraw(
       },
       Data.to(lpTokenRedeemer, LiquidityTokenLiquidityToken.redeemer)
     )
-    .attachMetadata(674, metadata)
-    .complete();
+    .attachMetadata(674, metadata);
+
+  if (lpValidatorRef.length == 0) {
+    console.log("Did not find LP policy. Will attach");
+
+    tx.attachMintingPolicy(validators.lpTokenPolicy);
+  }
+
+  const txBuild = await tx.complete();
 
   console.log("Off-chain validation passed, will sign the transaction");
 
-  const signedTx = await tx.sign().complete();
+  const signedTx = await txBuild.sign().complete();
   const txHash = await signedTx.submit();
   await lucid.awaitTx(txHash);
   return txHash;
@@ -617,7 +661,6 @@ async function doTheBorrow(
 
   const validators: Validators = collectValidators(
     lucid,
-    defaultConfig,
     poolNftName,
     GOV_TOKEN_NAME
   );
@@ -657,7 +700,8 @@ async function doTheBorrow(
     return "";
   }
 
-  poolDatumMapped.balance = poolDatumMapped.balance - loanAmount;
+  poolDatumMapped.balance =
+    poolDatumMapped.balance - loanAmount + poolConfigDatum.poolFee;
   poolDatumMapped.lentOut = poolDatumMapped.lentOut + loanAmount;
 
   let interestRate = getInterestRates(
@@ -737,24 +781,50 @@ async function doTheBorrow(
     balance: poolDatumMapped.balance + loanAmount,
   };
 
+  const maestroNetwork: MaestroSupportedNetworks =
+    process.env.ENVIRONMENT === "Mainnet" ? process.env.ENVIRONMENT : "Preprod";
+
+  if (process.env.MAESTRO_KEY == null) {
+    throw "MAESTRO_KEY is not defined";
+  }
+
+  let maestroClient = new MaestroClient(
+    new Configuration({
+      apiKey: process.env.MAESTRO_KEY,
+      network: maestroNetwork,
+    })
+  );
+
+  const transactionInfo = await maestroClient.transactions.txInfo(
+    batcherUtxo.txHash
+  );
+  const transactionMetadata: BorrowMetadataStandard =
+    transactionInfo.data.metadata;
+
   let oracleDetails: OracelValidatorDetails[] = [];
 
   if (poolDatumMapped.params.loanCs.policyId !== "") {
-    oracleDetails = await collectOracleDetails(
+    const oracleResult = await collectOracleDetails(
       poolDatumMapped.params.oracleLoanAsset,
       poolDatumMapped.params.loanCs,
+      Number(transactionMetadata["404"]?.a),
+      Number(transactionMetadata["404"]?.l),
       lucid,
       oracleDetails
     );
+    oracleDetails = oracleResult.oracleDetails;
   }
 
   if (poolDatumMapped.params.collateralCs.policyId !== "") {
-    oracleDetails = await collectOracleDetails(
+    const oracleResult = await collectOracleDetails(
       poolDatumMapped.params.oracleCollateralAsset,
       poolDatumMapped.params.collateralCs,
+      Number(transactionMetadata["405"]?.a),
+      Number(transactionMetadata["405"]?.l),
       lucid,
       oracleDetails
     );
+    oracleDetails = oracleResult.oracleDetails;
   }
 
   let metadata = {
@@ -805,10 +875,11 @@ async function doTheBorrow(
     },
   ];
 
-  lucid.selectWalletFromPrivateKey(
-    "" // Please add your key here ed25519_sk
-  );
+  if (process.env.BATCHER_KEY == null) {
+    throw "BATCHER_KEY is not defined";
+  }
 
+  lucid.selectWalletFromPrivateKey(process.env.BATCHER_KEY);
   const deployedValidators: DeployedValidators = parseValidators(
     deployedValidatorsJson
   );
@@ -892,7 +963,6 @@ async function doTheRepay(
 
   const validators: Validators = await collectValidators(
     lucid,
-    defaultConfig,
     poolNftName,
     GOV_TOKEN_NAME
   );
@@ -933,7 +1003,11 @@ async function doTheRepay(
   const loanPlusInterest =
     acumulatedInterest + collateralDatumMapped.loanAmount;
 
-  poolDatumMapped.balance = poolDatumMapped.balance + loanPlusInterest;
+  poolDatumMapped.balance =
+    poolDatumMapped.balance +
+    loanPlusInterest +
+    poolArtifacts.poolConfigDatum.poolFee;
+
   poolDatumMapped.lentOut =
     poolDatumMapped.lentOut - BigInt(collateralDatumMapped.loanAmount);
 
@@ -1011,10 +1085,15 @@ async function doTheRepay(
     batcherDatumMapped.order.expectedOutput.value
   );
 
+  if (process.env.BATCHER_KEY == null) {
+    throw "BATCHER_KEY is not defined";
+  }
+
   lucid.selectWalletFromPrivateKey(
-    "" // Please add your key here ed25519_sk
+    process.env.BATCHER_KEY // On production you will must have your own wallet.
   );
-  const tx = await lucid
+
+  const tx = lucid
     .newTx()
     .readFrom([deployedValidators.poolValidator])
     .readFrom([poolArtifacts.configUTxO])
@@ -1055,12 +1134,43 @@ async function doTheRepay(
     )
     .attachMetadata(674, metadata)
     .validFrom(validityRange.validFrom)
-    .validTo(validityRange.validTo)
-    .complete();
+    .validTo(validityRange.validTo);
+
+  const platformFee = getPlatformFee(
+    collateralDatumMapped.loanAmount,
+    collateralDatumMapped.balance,
+    collateralDatumMapped.lentOut,
+    collateralDatumMapped.poolConfig.loanFeeDetails
+  );
+
+  if (platformFee > 0n) {
+    const datum = Data.to(collateralDatumMapped.borrowerTn);
+
+    let feeAmount = (acumulatedInterest * platformFee) / 1000000n;
+
+    const fee_receiver_address = generateReceiverAddress(
+      lucid,
+      poolArtifacts.poolConfigDatum.loanFeeDetails.platformFeeCollectorAddress
+    );
+
+    tx.payToContract(
+      fee_receiver_address,
+      {
+        inline: datum,
+      },
+      {
+        [toUnitOrLovelace(
+          poolDatumMapped.params.loanCs.policyId,
+          poolDatumMapped.params.loanCs.assetName
+        )]: feeAmount,
+      }
+    );
+  }
+  const txBuild = await tx.complete();
 
   console.log("Off-chain validation passed, will sign the transaction");
 
-  const signedTx = await tx.sign().complete();
+  const signedTx = await txBuild.sign().complete();
   const txHash = await signedTx.submit();
   await lucid.awaitTx(txHash);
   return txHash;
@@ -1081,7 +1191,6 @@ async function doTheMerge(
   const validityRange: ValidityRange = getValidityRange(lucid);
   const validators: Validators = await collectValidators(
     lucid,
-    defaultConfig,
     poolTokenName,
     GOV_TOKEN_NAME
   );
@@ -1091,6 +1200,7 @@ async function doTheMerge(
     validators,
     lucid
   );
+
   var poolDatumMapped: PoolSpend["datum"] = poolArtifacts.poolDatumMapped;
 
   const poolAddress = poolArtifacts.poolUTxO.address;
@@ -1131,6 +1241,7 @@ async function doTheMerge(
     poolDatumMapped.balance +
     mergeDatumMapped.repayAmount +
     poolArtifacts.poolConfigDatum.poolFee;
+
   poolDatumMapped.lentOut =
     poolDatumMapped.lentOut - mergeDatumMapped.loanAmount;
 
@@ -1142,8 +1253,12 @@ async function doTheMerge(
     msg: ["Lenfi: MERGE to the pool."],
   };
 
+  if (process.env.BATCHER_KEY == null) {
+    throw "BATCHER_KEY is not defined";
+  }
+
   lucid.selectWalletFromPrivateKey(
-    "" // Please add your key here ed25519_sk
+    process.env.BATCHER_KEY // On production you will must have your own wallet.
   );
   const tx = await lucid
     .newTx()
@@ -1192,6 +1307,8 @@ async function doTheLiquidation(
   lucid: Translucent,
   collateralUtxo: UTxO
 ): Promise<string> {
+  console.log("this is liquidation");
+
   const collateralDatumMapped: CollateralSpend["datum"] = await lucid.datumOf(
     collateralUtxo,
     CollateralSpend.datum
@@ -1202,11 +1319,11 @@ async function doTheLiquidation(
 
   const validators: Validators = collectValidators(
     lucid,
-    defaultConfig,
     collateralDatumMapped.poolNftName,
     GOV_TOKEN_NAME
   );
   const poolNftName = collateralDatumMapped.poolNftName;
+
   const poolArtifacts = await getPoolArtifacts(poolNftName, validators, lucid);
   var poolDatumMapped: PoolSpend["datum"] = poolArtifacts.poolDatumMapped;
   const poolAddress = poolArtifacts.poolUTxO.address;
@@ -1229,7 +1346,11 @@ async function doTheLiquidation(
   const loanPlusInterest =
     accumulatedInterest + collateralDatumMapped.loanAmount;
 
-  poolDatumMapped.balance = poolDatumMapped.balance + loanPlusInterest;
+  poolDatumMapped.balance =
+    poolDatumMapped.balance +
+    loanPlusInterest +
+    poolArtifacts.poolConfigDatum.poolFee;
+
   poolDatumMapped.lentOut =
     poolDatumMapped.lentOut - BigInt(collateralDatumMapped.loanAmount);
 
@@ -1250,45 +1371,97 @@ async function doTheLiquidation(
     },
   };
 
-  const collateralOracleDetails = await collectOracleDetails(
-    poolDatumMapped.params.oracleCollateralAsset,
-    poolDatumMapped.params.collateralCs,
-    lucid
-  );
+  let oracleDetails: OracelValidatorDetails[] = [];
 
-  let collateralValueInAda = collateralDatumMapped.collateralAmount;
-  if (poolDatumMapped.params.collateralCs.policyId != "") {
-    collateralValueInAda = getAdaAmountIfSold(
-      poolDatumMapped.params.collateralCs.policyId,
-      poolDatumMapped.params.collateralCs.assetName,
-      collateralOracleDetails.redeemer,
-      collateralDatumMapped.collateralAmount
-    );
-  }
+  // When liquidating you have to define asset price.
+  const loanAssetPrice = {
+    amount: 200000000000000,
+    lovelaces: 200000000000000,
+  };
 
-  const loanOracleDetails = await collectOracleDetails(
-    poolDatumMapped.params.oracleLoanAsset,
-    poolDatumMapped.params.loanCs,
-    lucid
-  );
+  const collateralAssetPrice = {
+    amount: 100000000000000,
+    lovelaces: 500000000000000,
+  };
 
   let debtValueInAda = collateralDatumMapped.loanAmount + accumulatedInterest;
+  let loanTokenPriceFeed: PriceFeed = {
+    Pooled: [
+      {
+        token: { policyId: "", assetName: "" },
+        tokenAAmount: 0n,
+        tokenBAmount: 0n,
+        validTo: 0n,
+      },
+    ],
+  };
+
+  let collateralTokenPriceFeed: PriceFeed = {
+    Pooled: [
+      {
+        token: { policyId: "", assetName: "" },
+        tokenAAmount: 0n,
+        tokenBAmount: 0n,
+        validTo: 0n,
+      },
+    ],
+  };
+
+  if (poolDatumMapped.params.loanCs.policyId !== "") {
+    const oracleDetailsResult = await collectOracleDetails(
+      poolDatumMapped.params.oracleLoanAsset,
+      poolDatumMapped.params.loanCs,
+      loanAssetPrice.amount,
+      loanAssetPrice.lovelaces,
+      lucid,
+      oracleDetails
+    );
+    oracleDetails = oracleDetailsResult.oracleDetails;
+    loanTokenPriceFeed = oracleDetailsResult.data;
+  }
+
+  if (poolDatumMapped.params.collateralCs.policyId !== "") {
+    const oracleDetailsResult = await collectOracleDetails(
+      poolDatumMapped.params.oracleCollateralAsset,
+      poolDatumMapped.params.collateralCs,
+      collateralAssetPrice.amount,
+      collateralAssetPrice.lovelaces,
+      lucid,
+      oracleDetails
+    );
+    oracleDetails = oracleDetailsResult.oracleDetails;
+    collateralTokenPriceFeed = oracleDetailsResult.data;
+  }
+
   if (poolDatumMapped.params.loanCs.policyId != "") {
+    // Loan is non-ADA so oracle will have first item.
     debtValueInAda = getAdaAmountIfBought(
       poolDatumMapped.params.loanCs.policyId,
       poolDatumMapped.params.loanCs.assetName,
-      loanOracleDetails.redeemer,
+      loanTokenPriceFeed,
       collateralDatumMapped.loanAmount + accumulatedInterest
     );
   }
 
+  let collateralValueInAda = collateralDatumMapped.collateralAmount;
+
+  if (poolDatumMapped.params.collateralCs.policyId != "") {
+    // Only collateral is non ADA
+    collateralValueInAda = getAdaAmountIfSold(
+      poolDatumMapped.params.collateralCs.policyId,
+      poolDatumMapped.params.collateralCs.assetName,
+      collateralTokenPriceFeed,
+      collateralDatumMapped.collateralAmount
+    );
+  }
 
   // This is amount of remaining collateral liquidator can take
   const feePercentage = new BigNumber(
     Number(collateralDatumMapped.poolConfig.loanFeeDetails.liquidationFee)
   );
 
-  const feeAmount = Math.floor(
+
+  let feeAmount = Math.floor(
     new BigNumber(Number(collateralValueInAda))
       .minus(Number(debtValueInAda))
       .multipliedBy(feePercentage)
@@ -1296,18 +1469,24 @@ async function doTheLiquidation(
       .toNumber()
   );
 
+  // Protocol has min liquidation fee. Which should cover TX costs and pool fee.
+  if (feeAmount < collateralDatumMapped.poolConfig.minLiquidationFee) {
+    feeAmount = Number(collateralDatumMapped.poolConfig.minLiquidationFee);
+  }
+
   const remainingCollateralValue = new BigNumber(Number(collateralValueInAda))
     .minus(Number(debtValueInAda))
     .minus(feeAmount);
 
   let remaminingValueInCollateral = new BigNumber(0);
+
   if (collateralDatumMapped.collateralCs.policyId == "") {
     remaminingValueInCollateral = remainingCollateralValue;
   } else {
     remaminingValueInCollateral = new BigNumber(
       Number(
         assetGainAdaSale(
-          collateralOracleDetails.redeemer,
+          collateralTokenPriceFeed,
           BigInt(Math.ceil(Number(remainingCollateralValue.toNumber()))),
           collateralDatumMapped.collateralCs.policyId,
           collateralDatumMapped.collateralCs.assetName
@@ -1316,6 +1495,7 @@ async function doTheLiquidation(
     );
   }
 
+
   const healthFactor = new BigNumber(Number(collateralValueInAda))
     .multipliedBy(1000000)
     .dividedBy(Number(debtValueInAda))
@@ -1323,7 +1503,6 @@ async function doTheLiquidation(
 
   let payToAddresOutout = 0n;
   if (remaminingValueInCollateral.gt(0) && healthFactor.lt(1)) {
-
     const leftoverAddress = lucid.utils.validatorToAddress(
       validators.leftoverValidator,
       poolStakeCredentials
@@ -1344,7 +1523,7 @@ async function doTheLiquidation(
         [toUnitOrLovelace(
           poolDatumMapped.params.collateralCs.policyId,
           poolDatumMapped.params.collateralCs.assetName
-        )]: BigInt(Math.ceil(Number(remaminingValueInCollateral.toNumber())))+1n,
+        )]: BigInt(Math.ceil(Number(remaminingValueInCollateral.toNumber()))),
       }
     );
 
@@ -1372,24 +1551,23 @@ async function doTheLiquidation(
     },
   };
 
-  const burnRedeemer: CollateralMint["redeemer"] = {
-    mints: [],
-    burns: [{ tokenName: collateralDatumMapped.borrowerTn }],
-  };
-
   const deployedValidators: DeployedValidators = parseValidators(
     deployedValidatorsJson
   );
 
-  const deployedOracles: DeployedLPs = deployedOraclessJson;
-
   let metadata = {
-    msg: ["Lenfi: REPAY EXECUTED the pool."],
+    msg: ["Lenfi: ."],
   };
 
+  if (process.env.BATCHER_KEY == null) {
+    throw "BATCHER_KEY is not defined";
+  }
+
   lucid.selectWalletFromPrivateKey(
-    "" // Please add your key here ed25519_sk
+    process.env.BATCHER_KEY // On production you will must have your own wallet.
   );
+
+  tx.collectFrom(await lucid.wallet.getUtxos());
 
   tx.readFrom([deployedValidators.poolValidator])
     .readFrom([poolArtifacts.configUTxO])
@@ -1417,60 +1595,56 @@ async function doTheLiquidation(
     .validTo(validityRange.validTo)
     .attachMetadata(674, metadata);
 
-  // Attach collateral NFT details
-  if (collateralDatumMapped.collateralCs.policyId != "") {
-
-    tx.readFrom([collateralOracleDetails.scriptReferenceUtxo]);
+    
+  // For each oracle item read and add details to TX
+  oracleDetails.forEach(async (oracle) => {
     tx.withdraw(
-      collateralOracleDetails.rewardAddress,
+      oracle.rewardAddress,
       0n,
-      Data.to(
-        collateralOracleDetails.redeemer,
-        OracleValidatorWithdrawValidate.redeemer
-      )
-    );
-    if (collateralOracleDetails.oracleValidatorHash) {
-      const oracleValidators = await lucid.utxosByOutRef([
-        {
-          txHash:
-            deployedOracles[collateralOracleDetails.oracleValidatorHash].txHash,
-          outputIndex:
-            deployedOracles[collateralOracleDetails.oracleValidatorHash].txOref,
-        },
-      ]);
-      tx.readFrom(oracleValidators);
-    }
-  }
+      Data.to(oracle.redeemer, OracleValidatorWithdrawValidate.redeemer)
+    )
+      .readFrom([oracle.scriptReferenceUtxo])
+      .readFrom([oracle.nftReferenceUtxo]);
+  });
 
-  // Attach loan NFT details
-  if (collateralDatumMapped.loanCs.policyId != "") {
-    tx.readFrom([loanOracleDetails.scriptReferenceUtxo]);
-    tx.withdraw(
-      loanOracleDetails.rewardAddress,
-      0n,
-      Data.to(
-        loanOracleDetails.redeemer,
-        OracleValidatorWithdrawValidate.redeemer
-      )
-    );
-    if (loanOracleDetails.oracleValidatorHash) {
-      const oracleValidators = await lucid.utxosByOutRef([
-        {
-          txHash: deployedOracles[loanOracleDetails.oracleValidatorHash].txHash,
-          outputIndex:
-            deployedOracles[loanOracleDetails.oracleValidatorHash].txOref,
-        },
-      ]);
+  const platformFee = getPlatformFee(
+    collateralDatumMapped.loanAmount,
+    collateralDatumMapped.balance,
+    collateralDatumMapped.lentOut,
+    collateralDatumMapped.poolConfig.loanFeeDetails
+  );
 
-      tx.readFrom(oracleValidators);
-    }
+  if (platformFee > 0n) {
+    const datum = Data.to(collateralDatumMapped.borrowerTn);
+
+    let feeAmount = (accumulatedInterest * platformFee) / 1000000n;
+
+    const fee_receiver_address = generateReceiverAddress(
+      lucid,
+      poolArtifacts.poolConfigDatum.loanFeeDetails.platformFeeCollectorAddress
+    );
+
+    tx.payToContract(
+      fee_receiver_address,
+      {
+        inline: datum,
+      },
+      {
+        [toUnitOrLovelace(
+          poolDatumMapped.params.loanCs.policyId,
+          poolDatumMapped.params.loanCs.assetName
+        )]: feeAmount,
+      }
+    );
   }
 
   const txBuild = await tx.complete();
   console.log("Off-chain validation passed, will sign the transaction");
 
   const signedTx = await txBuild.sign().complete();
+
   const txHash = await signedTx.submit();
+  console.log("submitted");
   await lucid.awaitTx(txHash);
   return txHash;
 }

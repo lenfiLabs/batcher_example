@@ -13,38 +13,38 @@ export interface LpTokenCalculation {
 }
 
 export interface AssetClass {
-  policyId: string
-  assetName: string
+  policyId: string;
+  assetName: string;
 }
 
 export type OracelValidatorDetails = {
-  nftReferenceUtxo: UTxO
-  rewardAddress: string
-  redeemer: OracleValidatorWithdrawValidate['redeemer']
-  scriptReferenceUtxo: UTxO
-}
+  nftReferenceUtxo: UTxO;
+  rewardAddress: string;
+  redeemer: OracleValidatorWithdrawValidate["redeemer"];
+  scriptReferenceUtxo: UTxO;
+};
 
 export type PriceFeed =
   | {
       Aggregated: [
         {
-          token: {policyId: string; assetName: string}
-          tokenPriceInLovelaces: bigint
-          denominator: bigint
-          validTo: bigint
+          token: { policyId: string; assetName: string };
+          tokenPriceInLovelaces: bigint;
+          denominator: bigint;
+          validTo: bigint;
         },
-      ]
+      ];
     }
   | {
       Pooled: [
         {
-          token: {policyId: string; assetName: string}
-          tokenAAmount: bigint
-          tokenBAmount: bigint
-          validTo: bigint
+          token: { policyId: string; assetName: string };
+          tokenAAmount: bigint;
+          tokenBAmount: bigint;
+          validTo: bigint;
         },
-      ]
-    }
+      ];
+    };
 export interface WithdrawDetails {
   withdrawAmount: number;
   lpTokenBurnAmount: number;
@@ -122,3 +122,15 @@ export type DatumValue = {
   utxo: string;
   datum: string; // Seems to be a hex string, you might want to convert it into a human-readable form
 };
+
+export interface BorrowMetadataStandard {
+  "404"?: {
+    a?: string;
+    l?: string;
+  };
+  "405"?: {
+    a?: string;
+    l?: string;
+  };
+  [key: string]: any; // For other keys that might be present
+}
